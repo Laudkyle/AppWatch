@@ -21,6 +21,30 @@ export class AlertService {
 
   get configured() { return Boolean(this.#transport && this.#from); }
 
+  async sendVerification(user, token) {
+    if (!this.configured) throw new Error('Email delivery is not configured.');
+    const link = accountLink('verify', token);
+    await this.#transport.sendMail({
+      from: this.#from,
+      to: user.email,
+      subject: 'Verify your AppWatch email',
+      text: `Hello ${user.name},\n\nVerify your email address to activate your AppWatch account:\n${link}\n\nThis link expires in 24 hours. If you did not create this account, you can ignore this message.`,
+      html: `<p>Hello ${escapeHtml(user.name)},</p><p>Verify your email address to activate your AppWatch account:</p><p><a href="${escapeHtml(link)}">Verify email</a></p><p>This link expires in 24 hours. If you did not create this account, you can ignore this message.</p>`
+    });
+  }
+
+  async sendPasswordReset(user, token) {
+    if (!this.configured) throw new Error('Email delivery is not configured.');
+    const link = accountLink('reset', token);
+    await this.#transport.sendMail({
+      from: this.#from,
+      to: user.email,
+      subject: 'Reset your AppWatch password',
+      text: `Hello ${user.name},\n\nUse this link to reset your AppWatch password:\n${link}\n\nThis link expires in 1 hour. If you did not request a reset, you can ignore this message.`,
+      html: `<p>Hello ${escapeHtml(user.name)},</p><p>Use this link to reset your AppWatch password:</p><p><a href="${escapeHtml(link)}">Reset password</a></p><p>This link expires in 1 hour. If you did not request a reset, you can ignore this message.</p>`
+    });
+  }
+
   async test(userId) {
     if (!this.configured) throw new Error('Email delivery is not configured. Set SMTP_HOST and SMTP_FROM in .env, then restart AppWatch.');
     const preferences = await this.#store.getPreferences(userId);
@@ -54,6 +78,12 @@ export class AlertService {
       html: `<h2>${escapeHtml(app.name)} is ${label.toLowerCase()}</h2><p><a href="${url}">${url}</a></p><p>${escapeHtml(detail)}</p><p>Checked at ${escapeHtml(app.checkedAt)}.</p>`
     });
   }
+}
+
+function accountLink(key, token) {
+  const link = new URL(process.env.APP_BASE_URL || 'http://localhost:5173');
+  link.searchParams.set(key, token);
+  return link.toString();
 }
 
 function escapeHtml(value) {

@@ -11,11 +11,13 @@ import { Monitor } from './monitor.js';
 import { AlertService } from './alerts.js';
 import { createApiRouter } from './api.js';
 import { createAuthRouter, requireAuth } from './auth.js';
+import { validateTargetSecurityConfig } from './target-security.js';
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 3001);
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret || sessionSecret.length < 32) throw new Error('Set SESSION_SECRET to a random value of at least 32 characters.');
+validateTargetSecurityConfig();
 await migrate();
 const store = new PgStore(pool);
 const alerts = new AlertService(store);
@@ -36,7 +38,7 @@ app.use(session({
   saveUninitialized: false,
   cookie: { httpOnly: true, sameSite: 'lax', secure: process.env.COOKIE_SECURE === 'true', maxAge: 7 * 24 * 60 * 60 * 1000 }
 }));
-app.use('/api/auth', createAuthRouter(store));
+app.use('/api/auth', createAuthRouter(store, alerts));
 app.get('/api/health', async (_req, res, next) => {
   try { const { rows } = await pool.query('SELECT count(*)::int AS count FROM apps'); res.json({ ok: true, ...monitor.state, appCount: rows[0].count }); }
   catch (error) { next(error); }

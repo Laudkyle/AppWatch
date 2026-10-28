@@ -20,7 +20,7 @@ export class PgStore {
     finally { client.release(); }
   }
   async findUserByEmail(email) {
-    const { rows } = await this.pool.query('SELECT id, name, email, password_hash AS "passwordHash" FROM users WHERE email=$1', [email]);
+    const { rows } = await this.pool.query('SELECT id, name, email, password_hash AS "passwordHash", email_verified_at AS "emailVerifiedAt" FROM users WHERE email=$1', [email]);
     return rows[0] || null;
   }
   async getUser(id) {
@@ -35,9 +35,59 @@ export class PgStore {
     const { rows } = await this.pool.query('UPDATE users SET name=$2,email=$3 WHERE id=$1 RETURNING id,name,email', [id,name,email]);
     return rows[0] || null;
   }
-  async updatePassword(id, passwordHash) {
-    const result = await this.pool.query('UPDATE users SET password_hash=$2 WHERE id=$1', [id,passwordHash]);
-    return result.rowCount > 0;
+  async updatePassword(id, passwordHash, currentSessionId) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1', [id,passwordHash]);
+      if (result.rowCount) await client.query("DELETE FROM sessions WHERE sess->>'userId'=$1 AND sid<>$2", [id,currentSessionId || '']);
+      await client.query('COMMIT');
+      return result.rowCount > 0;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+  async createAuthToken(userId, purpose, tokenHash, expiresAt) {
+    await this.pool.query('DELETE FROM auth_tokens WHERE user_id=$1 AND purpose=$2', [userId,purpose]);
+    await this.pool.query('INSERT INTO auth_tokens (token_hash,user_id,purpose,expires_at) VALUES ($1,$2,$3,$4)', [tokenHash,userId,purpose,expiresAt]);
+  }
+  async consumeVerificationToken(tokenHash) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const token = await client.query("SELECT user_id FROM auth_tokens WHERE token_hash=$1 AND purpose='verify_email' AND used_at IS NULL AND expires_at>now() FOR UPDATE", [tokenHash]);
+      if (!token.rowCount) { await client.query('ROLLBACK'); return null; }
+      const userId = token.rows[0].user_id;
+      const { rows } = await client.query('UPDATE users SET email_verified_at=COALESCE(email_verified_at,now()) WHERE id=$1 RETURNING id,name,email,email_verified_at AS "emailVerifiedAt"', [userId]);
+      await client.query("UPDATE auth_tokens SET used_at=now() WHERE user_id=$1 AND purpose='verify_email' AND used_at IS NULL", [userId]);
+      await client.query('COMMIT');
+      return rows[0] || null;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+  async consumePasswordResetToken(tokenHash, passwordHash) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const token = await client.query("SELECT user_id FROM auth_tokens WHERE token_hash=$1 AND purpose='password_reset' AND used_at IS NULL AND expires_at>now() FOR UPDATE", [tokenHash]);
+      if (!token.rowCount) { await client.query('ROLLBACK'); return false; }
+      const userId = token.rows[0].user_id;
+      await client.query('UPDATE users SET password_hash=$2 WHERE id=$1', [userId,passwordHash]);
+      await client.query("UPDATE auth_tokens SET used_at=now() WHERE user_id=$1 AND purpose='password_reset' AND used_at IS NULL", [userId]);
+      await client.query("DELETE FROM sessions WHERE sess->>'userId'=$1", [userId]);
+      await client.query('COMMIT');
+      return true;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+  async consumeRateLimit(key, limit, windowSeconds) {
+    const { rows } = await this.pool.query(`INSERT INTO auth_rate_limits (key,window_started_at,hits) VALUES ($1,now(),1)
+      ON CONFLICT (key) DO UPDATE SET
+        hits=CASE WHEN auth_rate_limits.window_started_at + ($2 * interval '1 second') <= now() THEN 1 ELSE auth_rate_limits.hits+1 END,
+        window_started_at=CASE WHEN auth_rate_limits.window_started_at + ($2 * interval '1 second') <= now() THEN now() ELSE auth_rate_limits.window_started_at END
+      RETURNING hits,GREATEST(1,ceil(extract(epoch FROM (window_started_at + ($2 * interval '1 second') - now()))))::int AS "retryAfter"`, [key,windowSeconds]);
+    const result = { allowed: rows[0].hits <= limit, retryAfter: rows[0].retryAfter };
+    if (Math.random() < 0.01) this.pool.query("DELETE FROM auth_rate_limits WHERE window_started_at < now() - interval '2 days'").catch(() => {});
+    return result;
   }
   async getPreferences(userId) {
     const { rows } = await this.pool.query(`SELECT u.id,u.name,u.email,

@@ -1,18 +1,71 @@
+import http from 'node:http';
+import https from 'node:https';
+import { resolveAllowedTarget } from './target-security.js';
+
 const MAX_CONCURRENT_CHECKS = Math.max(1, Number(process.env.CHECK_CONCURRENCY || 8));
 
-async function probe(url, timeoutSeconds) {
+function requestOnce(url, method, signal) {
+  return new Promise(async (resolve, reject) => {
+    let agent;
+    try {
+      const addresses = await resolveAllowedTarget(url);
+      if (signal.aborted) throw Object.assign(new Error('Request timed out'), { name: 'AbortError' });
+      const pinnedLookup = (_hostname, options, callback) => {
+        if (options?.all) callback(null, addresses);
+        else callback(null, addresses[0].address, addresses[0].family);
+      };
+      const secure = url.protocol === 'https:';
+      const transport = secure ? https : http;
+      agent = secure ? new https.Agent({ keepAlive: false }) : new http.Agent({ keepAlive: false });
+      let settled = false;
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        agent.destroy();
+        if (error) reject(error); else resolve(result);
+      };
+      const request = transport.request(url, {
+        method,
+        signal,
+        agent,
+        lookup: pinnedLookup,
+        headers: method === 'GET' ? { Range: 'bytes=0-0', 'User-Agent': 'AppWatch-Monitor/1.0' } : { 'User-Agent': 'AppWatch-Monitor/1.0' }
+      }, response => {
+        const result = { status: response.statusCode || 0, location: response.headers.location || null };
+        response.destroy();
+        finish(null, result);
+      });
+      request.on('error', error => finish(error));
+      request.end();
+    } catch (error) {
+      agent?.destroy();
+      reject(error);
+    }
+  });
+}
+
+async function requestFollowingRedirects(initialUrl, method, signal) {
+  let url = initialUrl;
+  for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+    const response = await requestOnce(url, method, signal);
+    if (![301,302,303,307,308].includes(response.status) || !response.location) return response;
+    if (redirectCount === 5) throw new Error('Too many redirects.');
+    url = new URL(response.location, url);
+    if (!['http:', 'https:'].includes(url.protocol)) throw Object.assign(new Error('Redirected to a non-HTTP target.'), { code: 'TARGET_NOT_ALLOWED' });
+  }
+}
+
+async function probe(target, timeoutSeconds) {
   const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
   try {
-    let response = await fetch(url, { method: 'HEAD', signal: controller.signal, redirect: 'follow' });
-    if (response.status === 405 || response.status === 501) {
-      response = await fetch(url, { method: 'GET', signal: controller.signal, redirect: 'follow', headers: { Range: 'bytes=0-0' } });
-      if (response.body) await response.body.cancel();
-    }
+    const url = new URL(target);
+    let response = await requestFollowingRedirects(url, 'HEAD', controller.signal);
+    if (response.status === 405 || response.status === 501) response = await requestFollowingRedirects(url, 'GET', controller.signal);
     return { status: response.status < 500 ? 'up' : 'down', latency: Date.now() - started, error: response.status < 500 ? null : `HTTP ${response.status}` };
   } catch (error) {
-    return { status: 'down', latency: Date.now() - started, error: error.name === 'AbortError' ? 'Request timed out' : (error.cause?.code || error.message || 'Connection failed') };
+    return { status: 'down', latency: Date.now() - started, error: error.name === 'AbortError' ? 'Request timed out' : error.code === 'TARGET_NOT_ALLOWED' ? error.message : (error.cause?.code || error.message || 'Connection failed') };
   } finally { clearTimeout(timeout); }
 }
 

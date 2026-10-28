@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { parseAppInput } from './validation.js';
+import { validateTargetBeforeSave } from './target-security.js';
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isBool = value => typeof value === 'boolean';
@@ -37,7 +38,7 @@ export function createApiRouter(store, monitor, alerts) {
     if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 8 || Buffer.byteLength(newPassword, 'utf8') > 72) return res.status(400).json({ error: 'Enter your current password and a new password of at least 8 characters (72 bytes maximum).' });
     const user = await store.getUserForPassword(req.userId);
     if (!user || !await bcrypt.compare(currentPassword, user.passwordHash)) return res.status(400).json({ error: 'Current password is incorrect.' });
-    await store.updatePassword(req.userId, await bcrypt.hash(newPassword, 12));
+    await store.updatePassword(req.userId, await bcrypt.hash(newPassword, 12), req.sessionID);
     res.json({ ok: true });
   });
   router.put('/settings/monitoring', async (req, res) => {
@@ -88,11 +89,13 @@ export function createApiRouter(store, monitor, alerts) {
   });
   router.post('/apps', async (req, res) => {
     try {
-      const item = await store.create(req.userId, parseAppInput(req.body));
+      const fields = parseAppInput(req.body);
+      await validateTargetBeforeSave(fields.url);
+      const item = await store.create(req.userId, fields);
       res.status(201).json(item);
       monitor.checkOne(item.id).catch(error => console.error('Initial app check failed:', error));
     }
-    catch (error) { if (error instanceof Error && !error.code) return res.status(400).json({ error: error.message }); if (error.code === '23503') return res.status(400).json({ error: 'Choose one of your existing groups.' }); throw error; }
+    catch (error) { if (error.code === 'TARGET_NOT_ALLOWED') return res.status(400).json({ error: error.message }); if (error instanceof Error && !error.code) return res.status(400).json({ error: error.message }); if (error.code === '23503') return res.status(400).json({ error: 'Choose one of your existing groups.' }); throw error; }
   });
   router.get('/apps/:id', async (req, res) => {
     const item = await store.get(req.userId, req.params.id);
@@ -110,8 +113,8 @@ export function createApiRouter(store, monitor, alerts) {
     try { fields = parseAppInput(req.body, { partial: true }); }
     catch (error) { return res.status(400).json({ error: error.message }); }
     let item;
-    try { item = await store.update(req.userId, req.params.id, fields); }
-    catch (error) { if (error.code === '23503') return res.status(400).json({ error: 'Choose one of your existing groups.' }); throw error; }
+    try { if (fields.url) await validateTargetBeforeSave(fields.url); item = await store.update(req.userId, req.params.id, fields); }
+    catch (error) { if (error.code === 'TARGET_NOT_ALLOWED') return res.status(400).json({ error: error.message }); if (error.code === '23503') return res.status(400).json({ error: 'Choose one of your existing groups.' }); throw error; }
     if (!item) return res.status(404).json({ error: 'Application not found.' });
     res.json(item);
   });
