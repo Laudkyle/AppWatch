@@ -1,0 +1,94 @@
+[
+  {
+    "id": "d7491f96-e4d9-4e5a-9c9f-3475c0adece4",
+    "name": "App 1",
+    "url": "http://192.168.1.100/intranet",
+    "group": "Production",
+    "x": 70.30617551555997,
+    "y": 64.47483723300385,
+    "status": "up",
+    "latency": 305,
+    "checkedAt": "2026-10-27T22:26:20.654Z",
+    "error": null,
+    "history": [
+      {
+        "status": "up",
+        "latency": 604,
+        "time": "2026-10-27T22:17:08.732Z"
+      },
+      {
+        "status": "up",
+        "latency": 296,
+        "time": "2026-10-27T22:17:54.495Z"
+      },
+      {
+        "status": "up",
+        "latency": 701,
+        "error": null,
+        "time": "2026-10-27T22:22:20.937Z"
+      },
+      {
+        "status": "up",
+        "latency": 409,
+        "error": null,
+        "time": "2026-10-27T22:22:45.303Z"
+      },
+      {
+        "status": "up",
+        "latency": 307,
+        "error": null,
+        "time": "2026-10-27T22:23:20.626Z"
+      },
+      {
+        "status": "up",
+        "latency": 384,
+        "error": null,
+        "time": "2026-10-27T22:24:20.713Z"
+      },
+      {
+        "status": "up",
+        "latency": 210,
+        "error": null,
+        "time": "2026-10-27T22:25:20.554Z"
+      },
+      {
+        "status": "up",
+        "latency": 305,
+        "error": null,
+        "time": "2026-10-27T22:26:20.654Z"
+      }
+    ]
+  },
+  {
+    "id": "d87cafac-7168-446b-94e5-e44471066020",
+    "name": "APP2",
+    "url": "https://callback.bestpointgh.com:8680",
+    "group": "Production",
+    "x": 31.480211159539067,
+    "y": 72.45407501953547,
+    "status": "up",
+    "latency": 116,
+    "checkedAt": "2026-10-27T22:26:20.467Z",
+    "error": null,
+    "history": [
+      {
+        "status": "up",
+        "latency": 273,
+        "error": null,
+        "time": "2026-10-27T22:24:20.605Z"
+      },
+      {
+        "status": "up",
+        "latency": 199,
+        "error": null,
+        "time": "2026-10-27T22:25:20.546Z"
+      },
+      {
+        "status": "up",
+        "latency": 116,
+        "error": null,
+        "time": "2026-10-27T22:26:20.467Z"
+      }
+    ]
+  }
+]
