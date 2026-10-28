@@ -32,8 +32,22 @@ export class PgStore {
     return rows[0] || null;
   }
   async updateProfile(id, { name, email }) {
-    const { rows } = await this.pool.query('UPDATE users SET name=$2,email=$3 WHERE id=$1 RETURNING id,name,email', [id,name,email]);
-    return rows[0] || null;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const current = await client.query('SELECT email FROM users WHERE id=$1 FOR UPDATE', [id]);
+      const emailChanged = current.rowCount > 0 && current.rows[0].email !== email;
+      const { rows } = await client.query(`UPDATE users SET name=$2,email=$3,
+        email_verified_at=CASE WHEN $4 THEN NULL ELSE email_verified_at END
+        WHERE id=$1 RETURNING id,name,email,email_verified_at AS "emailVerifiedAt"`, [id,name,email,emailChanged]);
+      if (emailChanged) {
+        await client.query("DELETE FROM auth_tokens WHERE user_id=$1 AND purpose='verify_email'", [id]);
+        await client.query("DELETE FROM sessions WHERE sess->>'userId'=$1", [id]);
+      }
+      await client.query('COMMIT');
+      return rows[0] ? { ...rows[0], emailChanged } : null;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
   }
   async updatePassword(id, passwordHash, currentSessionId) {
     const client = await this.pool.connect();

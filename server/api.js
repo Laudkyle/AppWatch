@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
+import { createHash, randomBytes } from 'node:crypto';
 import { parseAppInput } from './validation.js';
 import { validateTargetBeforeSave } from './target-security.js';
 
@@ -30,7 +31,30 @@ export function createApiRouter(store, monitor, alerts) {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     if (!name || name.length > 80) return res.status(400).json({ error: 'Name is required and must be 80 characters or fewer.' });
     if (email.length > 254 || !emailPattern.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
-    try { res.json({ profile: await store.updateProfile(req.userId, { name, email }) }); }
+    try {
+      const currentUser = await store.getUser(req.userId);
+      if (!currentUser) return res.status(404).json({ error: 'Account not found.' });
+      if (currentUser.email !== email && !alerts.configured) return res.status(503).json({ error: 'Email delivery must be configured before changing your account email.' });
+      const profile = await store.updateProfile(req.userId, { name, email });
+      if (!profile) return res.status(404).json({ error: 'Account not found.' });
+      const emailChanged = profile.emailChanged;
+      delete profile.emailChanged;
+      if (emailChanged) {
+        const token = randomBytes(32).toString('base64url');
+        const tokenHash = createHash('sha256').update(token).digest('hex');
+        await store.createAuthToken(req.userId, 'verify_email', tokenHash, new Date(Date.now() + 24 * 60 * 60 * 1000));
+        let emailSent = true;
+        try { await alerts.sendVerification(profile, token); }
+        catch (error) { emailSent = false; console.error('Email-change verification could not be delivered:', error); }
+        await new Promise(resolve => req.session.destroy(() => resolve()));
+        res.clearCookie('appwatch.sid');
+        const message = emailSent
+          ? 'Your email changed. Verify the new address using the message we sent, then sign in again.'
+          : 'Your email changed, but the verification email could not be delivered. Fix SMTP, then sign in and request another verification email.';
+        return res.json({ profile, emailVerificationRequired: true, message });
+      }
+      res.json({ profile });
+    }
     catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'That email is already in use.' }); throw error; }
   });
   router.put('/settings/password', async (req, res) => {

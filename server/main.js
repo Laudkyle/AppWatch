@@ -57,10 +57,8 @@ app.use((error, _req, res, _next) => {
 
 const server = app.listen(port, () => {
   console.log(`AppWatch backend listening on http://localhost:${port}`);
-  monitor.start();
 });
 async function shutdown() {
-  monitor.stop();
   server.close(async () => { await pool.end(); process.exit(0); });
   setTimeout(() => process.exit(1), 10_000).unref();
 }

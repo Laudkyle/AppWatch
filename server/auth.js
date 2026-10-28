@@ -63,8 +63,7 @@ export function createAuthRouter(store, alerts) {
       const user = await store.findUserByEmail(email);
       if (user && !user.emailVerifiedAt) {
         const token = await issueToken(store, user.id, 'verify_email', 24 * 60 * 60 * 1000);
-        try { await alerts.sendVerification(user, token); }
-        catch (error) { console.error('Verification email could not be delivered:', error); }
+        alerts.sendVerification(user, token).catch(error => console.error('Verification email could not be delivered:', error));
       }
     }
     res.json({ message: genericVerifyMessage });
@@ -76,8 +75,7 @@ export function createAuthRouter(store, alerts) {
       const user = await store.findUserByEmail(email);
       if (user) {
         const token = await issueToken(store, user.id, 'password_reset', 60 * 60 * 1000);
-        try { await alerts.sendPasswordReset(user, token); }
-        catch (error) { console.error('Password-reset email could not be delivered:', error); }
+        alerts.sendPasswordReset(user, token).catch(error => console.error('Password-reset email could not be delivered:', error));
       }
     }
     res.json({ message: genericPasswordMessage });

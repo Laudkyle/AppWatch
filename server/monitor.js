@@ -4,43 +4,42 @@ import { resolveAllowedTarget } from './target-security.js';
 
 const MAX_CONCURRENT_CHECKS = Math.max(1, Number(process.env.CHECK_CONCURRENCY || 8));
 
-function requestOnce(url, method, signal) {
-  return new Promise(async (resolve, reject) => {
-    let agent;
-    try {
-      const addresses = await resolveAllowedTarget(url);
-      if (signal.aborted) throw Object.assign(new Error('Request timed out'), { name: 'AbortError' });
-      const pinnedLookup = (_hostname, options, callback) => {
-        if (options?.all) callback(null, addresses);
-        else callback(null, addresses[0].address, addresses[0].family);
-      };
-      const secure = url.protocol === 'https:';
-      const transport = secure ? https : http;
-      agent = secure ? new https.Agent({ keepAlive: false }) : new http.Agent({ keepAlive: false });
-      let settled = false;
-      const finish = (error, result) => {
-        if (settled) return;
-        settled = true;
-        agent.destroy();
-        if (error) reject(error); else resolve(result);
-      };
-      const request = transport.request(url, {
-        method,
-        signal,
-        agent,
-        lookup: pinnedLookup,
-        headers: method === 'GET' ? { Range: 'bytes=0-0', 'User-Agent': 'AppWatch-Monitor/1.0' } : { 'User-Agent': 'AppWatch-Monitor/1.0' }
-      }, response => {
-        const result = { status: response.statusCode || 0, location: response.headers.location || null };
-        response.destroy();
-        finish(null, result);
-      });
-      request.on('error', error => finish(error));
-      request.end();
-    } catch (error) {
-      agent?.destroy();
-      reject(error);
-    }
+async function requestOnce(url, method, signal) {
+  let removeAbort = () => {};
+  const addresses = await Promise.race([
+    resolveAllowedTarget(url),
+    new Promise((_, reject) => {
+      const abort = () => reject(Object.assign(new Error('Request timed out'), { name: 'AbortError' }));
+      if (signal.aborted) abort();
+      else { signal.addEventListener('abort', abort, { once: true }); removeAbort = () => signal.removeEventListener('abort', abort); }
+    })
+  ]).finally(() => removeAbort());
+  if (signal.aborted) throw Object.assign(new Error('Request timed out'), { name: 'AbortError' });
+  const pinnedLookup = (_hostname, options, callback) => {
+    if (options?.all) callback(null, addresses);
+    else callback(null, addresses[0].address, addresses[0].family);
+  };
+  const transport = url.protocol === 'https:' ? https : http;
+  const agent = url.protocol === 'https:' ? new https.Agent({ keepAlive: false }) : new http.Agent({ keepAlive: false });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      agent.destroy();
+      if (error) reject(error); else resolve(result);
+    };
+    const request = transport.request(url, {
+      method, signal, agent, lookup: pinnedLookup,
+      headers: method === 'GET' ? { Range: 'bytes=0-0', 'User-Agent': 'AppWatch-Monitor/1.0' } : { 'User-Agent': 'AppWatch-Monitor/1.0' }
+    }, response => {
+      const result = { status: response.statusCode || 0, location: response.headers.location || null };
+      response.on('error', () => {});
+      finish(null, result);
+      response.destroy();
+    });
+    request.on('error', error => finish(error));
+    request.end();
   });
 }
 
@@ -118,6 +117,10 @@ export class Monitor {
   }
 
   stop() { if (this.#timer) clearInterval(this.#timer); this.#timer = null; }
+
+  async waitForIdle() {
+    while (this.#running || this.#schedulerBusy) await new Promise(resolve => setTimeout(resolve, 100));
+  }
 
   async #runDueSchedules() {
     if (this.#schedulerBusy) return;
