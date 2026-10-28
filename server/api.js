@@ -44,8 +44,7 @@ export function createApiRouter(store, monitor, alerts) {
     const { checkIntervalSeconds, timeoutSeconds } = req.body || {};
     if (!Number.isInteger(checkIntervalSeconds) || checkIntervalSeconds < 30 || checkIntervalSeconds > 3600) return res.status(400).json({ error: 'Check interval must be between 30 and 3600 seconds.' });
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 2 || timeoutSeconds > 60) return res.status(400).json({ error: 'Timeout must be between 2 and 60 seconds.' });
-    const preferences = await store.getPreferences(req.userId);
-    res.json(await store.updatePreferences(req.userId, { ...preferences.monitoring, ...preferences.notifications, checkIntervalSeconds, timeoutSeconds }));
+    res.json(await store.updateMonitoring(req.userId, { checkIntervalSeconds, timeoutSeconds }));
   });
   router.put('/settings/notifications', async (req, res) => {
     const { emailAlerts, alertEmail, alertOnDown, alertOnRecovery } = req.body || {};
@@ -53,7 +52,8 @@ export function createApiRouter(store, monitor, alerts) {
     if (![emailAlerts, alertOnDown, alertOnRecovery].every(isBool)) return res.status(400).json({ error: 'Notification switches must be true or false.' });
     if (email.length > 254 || !emailPattern.test(email)) return res.status(400).json({ error: 'Enter a valid alert email address.' });
     const preferences = await store.getPreferences(req.userId);
-    res.json(await store.updatePreferences(req.userId, { ...preferences.monitoring, emailAlerts, alertEmail: email, alertOnDown, alertOnRecovery }));
+    const storedAlertEmail = email === preferences.profile.email.toLowerCase() ? null : email;
+    res.json(await store.updateNotifications(req.userId, { emailAlerts, alertEmail: storedAlertEmail, alertOnDown, alertOnRecovery }));
   });
   router.post('/settings/test-alert', async (req, res) => {
     try { await alerts.test(req.userId); res.json({ ok: true }); }
@@ -77,10 +77,13 @@ export function createApiRouter(store, monitor, alerts) {
       const group = await store.updateGroup(req.userId, req.params.id, { name, color });
       if (!group) return res.status(404).json({ error: 'Group not found.' });
       res.json(group);
-    } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'A group with that name already exists.' }); throw error; }
+    } catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'A group with that name already exists.' }); if (error.code === 'GROUP_RESERVED') return res.status(400).json({ error: error.message }); throw error; }
   });
   router.delete('/groups/:id', async (req, res) => {
-    if (!await store.removeGroup(req.userId, req.params.id)) return res.status(409).json({ error: 'Group not found or the Unassigned group cannot be removed.' });
+    const group = (await store.listGroups(req.userId)).find(item => item.id === req.params.id);
+    if (!group) return res.status(404).json({ error: 'Group not found.' });
+    if (group.name === 'Unassigned') return res.status(409).json({ error: 'The Unassigned group is required and cannot be removed.' });
+    if (!await store.removeGroup(req.userId, req.params.id)) return res.status(409).json({ error: 'This group could not be removed.' });
     res.status(204).end();
   });
   router.post('/apps', async (req, res) => {

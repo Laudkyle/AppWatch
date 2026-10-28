@@ -49,10 +49,12 @@ export class PgStore {
     const row = rows[0];
     return { profile: { id: row.id, name: row.name, email: row.email }, monitoring: { checkIntervalSeconds: row.checkIntervalSeconds, timeoutSeconds: row.timeoutSeconds }, notifications: { emailAlerts: row.emailAlerts, alertEmail: row.alertEmail, alertOnDown: row.alertOnDown, alertOnRecovery: row.alertOnRecovery } };
   }
-  async updatePreferences(userId, { checkIntervalSeconds, timeoutSeconds, emailAlerts, alertEmail, alertOnDown, alertOnRecovery }) {
-    await this.pool.query(`UPDATE user_settings SET check_interval_seconds=$2,timeout_seconds=$3,email_alerts=$4,
-      alert_email=$5,alert_on_down=$6,alert_on_recovery=$7,updated_at=now() WHERE user_id=$1`,
-      [userId,checkIntervalSeconds,timeoutSeconds,emailAlerts,alertEmail,alertOnDown,alertOnRecovery]);
+  async updateMonitoring(userId, { checkIntervalSeconds, timeoutSeconds }) {
+    await this.pool.query('UPDATE user_settings SET check_interval_seconds=$2,timeout_seconds=$3,updated_at=now() WHERE user_id=$1', [userId,checkIntervalSeconds,timeoutSeconds]);
+    return this.getPreferences(userId);
+  }
+  async updateNotifications(userId, { emailAlerts, alertEmail, alertOnDown, alertOnRecovery }) {
+    await this.pool.query('UPDATE user_settings SET email_alerts=$2,alert_email=$3,alert_on_down=$4,alert_on_recovery=$5,updated_at=now() WHERE user_id=$1', [userId,emailAlerts,alertEmail,alertOnDown,alertOnRecovery]);
     return this.getPreferences(userId);
   }
 
@@ -67,6 +69,9 @@ export class PgStore {
     return { ...rows[0], appCount: 0 };
   }
   async updateGroup(userId, id, { name, color }) {
+    const previous = await this.pool.query('SELECT name FROM app_groups WHERE id=$1 AND user_id=$2', [id,userId]);
+    if (!previous.rowCount) return null;
+    if (previous.rows[0].name === 'Unassigned' && name !== 'Unassigned') throw Object.assign(new Error('The Unassigned group name is reserved.'), { code: 'GROUP_RESERVED' });
     const { rows } = await this.pool.query('UPDATE app_groups SET name=$3,color=$4 WHERE id=$1 AND user_id=$2 RETURNING id,name,color', [id,userId,name,color]);
     if (!rows[0]) return null;
     const { rows: countRows } = await this.pool.query('SELECT count(*)::int AS count FROM apps WHERE user_id=$1 AND group_name=$2', [userId,name]);
@@ -145,18 +150,24 @@ export class PgStore {
   async updateCheck(id, result, checkedAt) {
     const client = await this.pool.connect();
     let userId;
+    let app;
     try {
       await client.query('BEGIN');
       const before = await client.query('SELECT status,user_id FROM apps WHERE id=$1 FOR UPDATE', [id]);
       if (!before.rowCount) { await client.query('ROLLBACK'); return null; }
       const previousStatus = before.rows[0].status;
       userId = before.rows[0].user_id;
-      const updated = await client.query('UPDATE apps SET status=$2,latency=$3,error=$4,checked_at=$5 WHERE id=$1 RETURNING user_id', [id,result.status,result.latency,result.error,checkedAt]);
+      await client.query('UPDATE apps SET status=$2,latency=$3,error=$4,checked_at=$5 WHERE id=$1', [id,result.status,result.latency,result.error,checkedAt]);
       await client.query('INSERT INTO check_history (app_id,status,latency,error,checked_at) VALUES ($1,$2,$3,$4,$5)', [id,result.status,result.latency,result.error,checkedAt]);
       await client.query('DELETE FROM check_history WHERE app_id=$1 AND id NOT IN (SELECT id FROM check_history WHERE app_id=$1 ORDER BY checked_at DESC LIMIT 100)', [id]);
+      const current = await client.query(`SELECT ${appFields}, COALESCE((
+        SELECT json_agg(json_build_object('status', h.status, 'latency', h.latency, 'time', h.checked_at) ORDER BY h.checked_at)
+        FROM check_history h WHERE h.app_id=a.id
+      ), '[]'::json) AS history FROM apps a WHERE a.id=$1 AND a.user_id=$2`, [id,userId]);
+      app = mapApp(current.rows[0]);
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
-    return { app: await this.get(userId, id), previousStatus, userId };
+    return { app, previousStatus, userId };
   }
 }
