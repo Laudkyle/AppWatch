@@ -141,6 +141,18 @@ export function createApiRouter(store, monitor, alerts) {
     if (!result) return res.status(404).json({ error: 'Application not found.' });
     res.json(result);
   });
+  router.get('/analytics/availability', async (req, res) => {
+    const range = typeof req.query.range === 'string' ? req.query.range : '24h';
+    if (!['24h','7d','30d','90d'].includes(range)) return res.status(400).json({ error: 'Choose a 24 hour, 7 day, 30 day, or 90 day range.' });
+    const groupId = typeof req.query.groupId === 'string' ? req.query.groupId : null;
+    const appId = typeof req.query.appId === 'string' ? req.query.appId : null;
+    if (groupId && appId) return res.status(400).json({ error: 'Choose one app or one group.' });
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if ((groupId && !uuidPattern.test(groupId)) || (appId && !uuidPattern.test(appId))) return res.status(400).json({ error: 'The selected application or group is invalid.' });
+    const report = await store.getAvailabilityReport(req.userId,{ range,groupId,appId });
+    if (!report) return res.status(404).json({ error: 'Application or group not found.' });
+    res.json(report);
+  });
   router.put('/apps/:id', async (req, res) => {
     let fields;
     try { fields = parseAppInput(req.body, { partial: true }); }

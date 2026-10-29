@@ -73,6 +73,8 @@ Restore refuses to use the same host, port, and database name as `DATABASE_URL`;
 
 On the network map, drag an application to reposition it on its own, or drag a group label to move all apps in that group together. Positions are saved to PostgreSQL.
 
+The **Availability** view charts recorded uptime and downtime over 24 hours, 7 days, 30 days, or 90 days. Reports can cover all applications, one group, or one app. A downtime incident begins at the first failed check and ends at the first successful recovery check; the prior successful check is recorded as the lower bound on when the outage began. Incident records are retained separately from the rolling 100-check detail history. Existing check history is backfilled where available when the downtime migration is applied.
+
 The worker checks accounts according to each account's saved interval. New applications are checked immediately. Scheduled checks run in one worker process guarded by a PostgreSQL advisory lock; manually requested checks may also be initiated through the API.
 
 ## API
@@ -102,6 +104,7 @@ All endpoints return JSON and use `/api`. Except for health and auth endpoints, 
 | `GET` / `POST` | `/apps` | List or create monitored apps |
 | `GET` / `PUT` / `DELETE` | `/apps/:id` | Read, update, or delete an owned app |
 | `GET` | `/apps/:id/history?limit=24` | Read check history (up to 100 records) |
+| `GET` | `/analytics/availability?range=24h&groupId=:id` | Availability series, downtime summary, and incidents for all apps, a group, or an app |
 | `POST` | `/apps/:id/check` | Check one app immediately |
 | `POST` | `/check` | Check the signed-in account's apps immediately |
 

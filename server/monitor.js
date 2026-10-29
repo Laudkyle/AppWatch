@@ -87,7 +87,7 @@ export class Monitor {
     const checkedAt = new Date().toISOString();
     const update = await this.#store.updateCheck(id, result, checkedAt);
     if (!update) return null;
-    if (this.#alerts) this.#alerts.notify({ userId: update.userId, app: update.app, previousStatus: update.previousStatus }).catch(error => console.error('AppWatch alert delivery failed:', error));
+    if (this.#alerts && !update.stale) this.#alerts.notify({ userId: update.userId, app: update.app, previousStatus: update.previousStatus }).catch(error => console.error('AppWatch alert delivery failed:', error));
     return update.app;
   }
 

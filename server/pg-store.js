@@ -218,6 +218,82 @@ export class PgStore {
     const { rows } = await this.pool.query("SELECT status, latency, checked_at AS time FROM check_history WHERE app_id=$1 ORDER BY checked_at DESC LIMIT $2", [id, limit]);
     return { id, history: rows.reverse().map(row => ({ ...row, latency: Number(row.latency) })) };
   }
+  async getAvailabilityReport(userId, { range, groupId, appId }) {
+    const durationSeconds = { '24h': 24 * 3600, '7d': 7 * 86400, '30d': 30 * 86400, '90d': 90 * 86400 }[range];
+    const now = new Date();
+    const start = new Date(now.getTime() - durationSeconds * 1000);
+    let scope = { type: 'all', id: null, label: 'All applications' };
+    let appsResult;
+    if (appId) {
+      appsResult = await this.pool.query(`SELECT id,name,group_name AS "groupName",monitoring_started_at AS "monitoringStartedAt"
+        FROM apps WHERE user_id=$1 AND id=$2`, [userId,appId]);
+      if (!appsResult.rowCount) return null;
+      scope = { type: 'app', id: appId, label: appsResult.rows[0].name };
+    } else if (groupId) {
+      const group = await this.pool.query('SELECT id,name FROM app_groups WHERE user_id=$1 AND id=$2', [userId,groupId]);
+      if (!group.rowCount) return null;
+      scope = { type: 'group', id: groupId, label: group.rows[0].name };
+      appsResult = await this.pool.query(`SELECT a.id,a.name,a.group_name AS "groupName",a.monitoring_started_at AS "monitoringStartedAt"
+        FROM apps a JOIN app_groups g ON g.user_id=a.user_id AND g.name=a.group_name
+        WHERE a.user_id=$1 AND g.id=$2`, [userId,groupId]);
+    } else {
+      appsResult = await this.pool.query(`SELECT id,name,group_name AS "groupName",monitoring_started_at AS "monitoringStartedAt"
+        FROM apps WHERE user_id=$1 ORDER BY lower(name)`, [userId]);
+    }
+    const apps = appsResult.rows;
+    const ids = apps.map(app => app.id);
+    const bucketSeconds = range === '24h' ? 3600 : 86400;
+    const metricsResult = ids.length ? await this.pool.query(`WITH buckets AS (
+        SELECT bucket_start,LEAST(bucket_start + $5::int * interval '1 second',$4::timestamptz) AS bucket_end
+        FROM generate_series($3::timestamptz,$4::timestamptz - interval '1 millisecond',$5::int * interval '1 second') AS generated(bucket_start)
+      )
+      SELECT b.bucket_start AS start,b.bucket_end AS "end",
+        COALESCE(monitored.seconds,0) AS "monitoredSeconds",COALESCE(downtime.seconds,0) AS "downtimeSeconds"
+      FROM buckets b
+      CROSS JOIN LATERAL (
+        SELECT SUM(EXTRACT(epoch FROM (b.bucket_end-GREATEST(b.bucket_start,a.monitoring_started_at)))) AS seconds
+        FROM apps a WHERE a.user_id=$1 AND a.id=ANY($2::uuid[]) AND a.monitoring_started_at IS NOT NULL AND a.monitoring_started_at < b.bucket_end
+      ) monitored
+      CROSS JOIN LATERAL (
+        SELECT SUM(EXTRACT(epoch FROM (LEAST(b.bucket_end,COALESCE(d.recovered_at,$4::timestamptz))-GREATEST(b.bucket_start,d.started_at,a.monitoring_started_at)))) AS seconds
+        FROM app_downtime_incidents d JOIN apps a ON a.id=d.app_id
+        WHERE d.user_id=$1 AND d.app_id=ANY($2::uuid[]) AND a.monitoring_started_at IS NOT NULL
+          AND d.started_at < b.bucket_end AND COALESCE(d.recovered_at,$4::timestamptz) > b.bucket_start
+          AND LEAST(b.bucket_end,COALESCE(d.recovered_at,$4::timestamptz)) > GREATEST(b.bucket_start,d.started_at,a.monitoring_started_at)
+      ) downtime
+      ORDER BY b.bucket_start`, [userId,ids,start,now,bucketSeconds]) : { rows: [] };
+    const incidentCounts = ids.length ? await this.pool.query(`SELECT
+        count(*) FILTER (WHERE started_at >= $3)::int AS "incidentCount",
+        count(*) FILTER (WHERE recovered_at IS NULL)::int AS "openIncidentCount"
+      FROM app_downtime_incidents WHERE user_id=$1 AND app_id=ANY($2::uuid[])
+        AND started_at < $4 AND (recovered_at IS NULL OR recovered_at > $3)`, [userId,ids,start,now]) : { rows: [{ incidentCount: 0, openIncidentCount: 0 }] };
+    const incidentsResult = ids.length ? await this.pool.query(`SELECT id,app_id AS "appId",app_name AS "appName",group_name AS "groupName",
+        started_at AS "startedAt",last_up_at AS "lastUpAt",recovered_at AS "recoveredAt"
+      FROM app_downtime_incidents WHERE user_id=$1 AND app_id=ANY($2::uuid[])
+        AND started_at < $4 AND (recovered_at IS NULL OR recovered_at > $3)
+      ORDER BY started_at DESC LIMIT 50`, [userId,ids,start,now]) : { rows: [] };
+    const series = metricsResult.rows.map(row => {
+      const monitoredSeconds = Number(row.monitoredSeconds); const downtimeSeconds = Math.min(Number(row.downtimeSeconds),monitoredSeconds);
+      return { start: new Date(row.start).toISOString(),end: new Date(row.end).toISOString(),monitoredSeconds: Math.round(monitoredSeconds),downtimeSeconds: Math.round(downtimeSeconds),availabilityPercent: monitoredSeconds ? Math.max(0,(1-downtimeSeconds/monitoredSeconds)*100) : null };
+    });
+    const totalMonitoredSeconds = series.reduce((sum,point) => sum + point.monitoredSeconds,0);
+    const totalDowntimeSeconds = Math.min(series.reduce((sum,point) => sum + point.downtimeSeconds,0),totalMonitoredSeconds);
+    const incidentCount = incidentCounts.rows[0].incidentCount;
+    const openIncidentCount = incidentCounts.rows[0].openIncidentCount;
+      const incidents = incidentsResult.rows;
+    return {
+      range, scope, appCount: apps.length,
+      summary: {
+        availabilityPercent: totalMonitoredSeconds ? Math.max(0,(1-totalDowntimeSeconds/totalMonitoredSeconds)*100) : null,
+        monitoredSeconds: Math.round(totalMonitoredSeconds), downtimeSeconds: Math.round(totalDowntimeSeconds),
+        incidentCount, openIncidentCount
+      },
+      series,
+      incidents: incidents.slice(0,50).map(incident => ({ ...incident,
+        durationSeconds: Math.max(0,((incident.recoveredAt ? new Date(incident.recoveredAt) : now).getTime()-new Date(incident.startedAt).getTime())/1000)
+      }))
+    };
+  }
   async create(userId, fields) {
     const id = randomUUID();
     const client = await this.pool.connect();
@@ -251,15 +327,32 @@ export class PgStore {
     const client = await this.pool.connect();
     let userId;
     let app;
+    let previousStatus;
     try {
       await client.query('BEGIN');
-      const before = await client.query('SELECT status,user_id FROM apps WHERE id=$1 FOR UPDATE', [id]);
+      const before = await client.query('SELECT status,user_id,checked_at,name,group_name FROM apps WHERE id=$1 FOR UPDATE', [id]);
       if (!before.rowCount) { await client.query('ROLLBACK'); return null; }
-      const previousStatus = before.rows[0].status;
+      previousStatus = before.rows[0].status;
       userId = before.rows[0].user_id;
-      await client.query('UPDATE apps SET status=$2,latency=$3,error=$4,checked_at=$5 WHERE id=$1', [id,result.status,result.latency,result.error,checkedAt]);
+      if (before.rows[0].checked_at && new Date(checkedAt).getTime() <= new Date(before.rows[0].checked_at).getTime()) {
+        const current = await client.query(`SELECT ${appFields}, COALESCE((
+          SELECT json_agg(json_build_object('status', h.status, 'latency', h.latency, 'time', h.checked_at) ORDER BY h.checked_at)
+          FROM check_history h WHERE h.app_id=a.id
+        ), '[]'::json) AS history FROM apps a WHERE a.id=$1 AND a.user_id=$2`, [id,userId]);
+        await client.query('ROLLBACK');
+        return { app: mapApp(current.rows[0]), previousStatus, userId, stale: true };
+      }
+      await client.query('UPDATE apps SET status=$2,latency=$3,error=$4,checked_at=$5,monitoring_started_at=COALESCE(monitoring_started_at,$5) WHERE id=$1', [id,result.status,result.latency,result.error,checkedAt]);
       await client.query('INSERT INTO check_history (app_id,status,latency,error,checked_at) VALUES ($1,$2,$3,$4,$5)', [id,result.status,result.latency,result.error,checkedAt]);
       await client.query('DELETE FROM check_history WHERE app_id=$1 AND id NOT IN (SELECT id FROM check_history WHERE app_id=$1 ORDER BY checked_at DESC LIMIT 100)', [id]);
+      if (result.status === 'down' && previousStatus !== 'down') {
+        await client.query(`INSERT INTO app_downtime_incidents (app_id,user_id,app_name,group_name,started_at,last_up_at)
+          VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (app_id) WHERE recovered_at IS NULL DO NOTHING`,
+        [id,userId,before.rows[0].name,before.rows[0].group_name,checkedAt,previousStatus === 'up' ? before.rows[0].checked_at : null]);
+      } else if (result.status === 'up' && previousStatus === 'down') {
+        await client.query(`UPDATE app_downtime_incidents SET recovered_at=$2
+          WHERE app_id=$1 AND recovered_at IS NULL`, [id,checkedAt]);
+      }
       const current = await client.query(`SELECT ${appFields}, COALESCE((
         SELECT json_agg(json_build_object('status', h.status, 'latency', h.latency, 'time', h.checked_at) ORDER BY h.checked_at)
         FROM check_history h WHERE h.app_id=a.id
