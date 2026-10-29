@@ -66,10 +66,12 @@ export function createApiRouter(store, monitor, alerts) {
     res.json({ ok: true });
   });
   router.put('/settings/monitoring', async (req, res) => {
-    const { checkIntervalSeconds, timeoutSeconds } = req.body || {};
+    const { checkIntervalSeconds, timeoutSeconds, appLimit } = req.body || {};
     if (!Number.isInteger(checkIntervalSeconds) || checkIntervalSeconds < 30 || checkIntervalSeconds > 3600) return res.status(400).json({ error: 'Check interval must be between 30 and 3600 seconds.' });
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 2 || timeoutSeconds > 60) return res.status(400).json({ error: 'Timeout must be between 2 and 60 seconds.' });
-    res.json(await store.updateMonitoring(req.userId, { checkIntervalSeconds, timeoutSeconds }));
+    if (!Number.isInteger(appLimit) || appLimit < 1 || appLimit > 1000) return res.status(400).json({ error: 'Application limit must be between 1 and 1000.' });
+    try { res.json(await store.updateMonitoring(req.userId, { checkIntervalSeconds, timeoutSeconds, appLimit })); }
+    catch (error) { if (error.code === 'APP_LIMIT_BELOW_CURRENT') return res.status(409).json({ error: error.message }); throw error; }
   });
   router.put('/settings/notifications', async (req, res) => {
     const { emailAlerts, alertEmail, alertOnDown, alertOnRecovery } = req.body || {};
@@ -92,6 +94,13 @@ export function createApiRouter(store, monitor, alerts) {
     if (!colorPattern.test(color)) return res.status(400).json({ error: 'Choose a valid group color.' });
     try { res.status(201).json(await store.createGroup(req.userId, { name, color })); }
     catch (error) { if (error.code === '23505') return res.status(409).json({ error: 'A group with that name already exists.' }); throw error; }
+  });
+  router.put('/groups/:id/map-position', async (req, res) => {
+    const { dx, dy } = req.body || {};
+    if (![dx, dy].every(value => typeof value === 'number' && Number.isFinite(value)) || Math.abs(dx) > 82 || Math.abs(dy) > 78) return res.status(400).json({ error: 'Group movement is invalid.' });
+    const positions = await store.moveGroupOnMap(req.userId, req.params.id, { dx, dy });
+    if (!positions) return res.status(404).json({ error: 'Group not found.' });
+    res.json({ positions });
   });
   router.put('/groups/:id', async (req, res) => {
     const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
@@ -119,7 +128,7 @@ export function createApiRouter(store, monitor, alerts) {
       res.status(201).json(item);
       monitor.checkOne(item.id).catch(error => console.error('Initial app check failed:', error));
     }
-    catch (error) { if (error.code === 'TARGET_NOT_ALLOWED') return res.status(400).json({ error: error.message }); if (error instanceof Error && !error.code) return res.status(400).json({ error: error.message }); if (error.code === '23503') return res.status(400).json({ error: 'Choose one of your existing groups.' }); throw error; }
+    catch (error) { if (error.code === 'TARGET_NOT_ALLOWED') return res.status(400).json({ error: error.message }); if (error.code === 'APP_LIMIT_REACHED') return res.status(409).json({ error: error.message }); if (error instanceof Error && !error.code) return res.status(400).json({ error: error.message }); if (error.code === '23503') return res.status(400).json({ error: 'Choose one of your existing groups.' }); throw error; }
   });
   router.get('/apps/:id', async (req, res) => {
     const item = await store.get(req.userId, req.params.id);

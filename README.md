@@ -66,9 +66,12 @@ Restore refuses to use the same host, port, and database name as `DATABASE_URL`;
 
 - **Profile:** update the account name and verified email address.
 - **Password:** change the password after confirming the current one; other signed-in sessions are revoked.
-- **Monitoring defaults:** set the per-account interval (30 seconds to 60 minutes) and request timeout (2 to 60 seconds).
+- **Monitoring defaults:** set the per-account interval (30 seconds to 60 minutes), request timeout (2 to 60 seconds), and application limit (1 to 1,000). The limit cannot be set below the number of apps already monitored.
 - **Email alerts:** set the notification destination and choose outage and recovery alerts.
 - **Groups:** create, rename, recolor, and delete groups. Deleting a group moves its apps to Unassigned; that required group cannot be renamed or deleted.
+- **Appearance:** choose a saved light or dark theme. The profile menu at the upper right also provides theme shortcuts and account settings.
+
+On the network map, drag an application to reposition it on its own, or drag a group label to move all apps in that group together. Positions are saved to PostgreSQL.
 
 The worker checks accounts according to each account's saved interval. New applications are checked immediately. Scheduled checks run in one worker process guarded by a PostgreSQL advisory lock; manually requested checks may also be initiated through the API.
 
@@ -90,11 +93,12 @@ All endpoints return JSON and use `/api`. Except for health and auth endpoints, 
 | `GET` | `/settings` | Read profile, monitoring, notification, delivery, and group settings |
 | `PUT` | `/settings/profile` | Update name or email; email changes require re-verification |
 | `PUT` | `/settings/password` | Change password with current-password confirmation |
-| `PUT` | `/settings/monitoring` | Save check interval and timeout |
+| `PUT` | `/settings/monitoring` | Save check interval, timeout, and app limit |
 | `PUT` | `/settings/notifications` | Save alert email and event preferences |
 | `POST` | `/settings/test-alert` | Send a test email |
 | `GET` / `POST` | `/groups` | List or create a group |
 | `PUT` / `DELETE` | `/groups/:id` | Rename/recolor or delete an owned group |
+| `PUT` | `/groups/:id/map-position` | Move all app positions in an owned group by a relative offset |
 | `GET` / `POST` | `/apps` | List or create monitored apps |
 | `GET` / `PUT` / `DELETE` | `/apps/:id` | Read, update, or delete an owned app |
 | `GET` | `/apps/:id/history?limit=24` | Read check history (up to 100 records) |

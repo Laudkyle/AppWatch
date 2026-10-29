@@ -106,15 +106,26 @@ export class PgStore {
   async getPreferences(userId) {
     const { rows } = await this.pool.query(`SELECT u.id,u.name,u.email,
       s.check_interval_seconds AS "checkIntervalSeconds", s.timeout_seconds AS "timeoutSeconds",
+      s.app_limit AS "appLimit",
       s.email_alerts AS "emailAlerts", COALESCE(s.alert_email,u.email) AS "alertEmail",
       s.alert_on_down AS "alertOnDown", s.alert_on_recovery AS "alertOnRecovery"
       FROM users u JOIN user_settings s ON s.user_id=u.id WHERE u.id=$1`, [userId]);
     if (!rows[0]) return null;
     const row = rows[0];
-    return { profile: { id: row.id, name: row.name, email: row.email }, monitoring: { checkIntervalSeconds: row.checkIntervalSeconds, timeoutSeconds: row.timeoutSeconds }, notifications: { emailAlerts: row.emailAlerts, alertEmail: row.alertEmail, alertOnDown: row.alertOnDown, alertOnRecovery: row.alertOnRecovery } };
+    return { profile: { id: row.id, name: row.name, email: row.email }, monitoring: { checkIntervalSeconds: row.checkIntervalSeconds, timeoutSeconds: row.timeoutSeconds, appLimit: row.appLimit }, notifications: { emailAlerts: row.emailAlerts, alertEmail: row.alertEmail, alertOnDown: row.alertOnDown, alertOnRecovery: row.alertOnRecovery } };
   }
-  async updateMonitoring(userId, { checkIntervalSeconds, timeoutSeconds }) {
-    await this.pool.query('UPDATE user_settings SET check_interval_seconds=$2,timeout_seconds=$3,updated_at=now() WHERE user_id=$1', [userId,checkIntervalSeconds,timeoutSeconds]);
+  async updateMonitoring(userId, { checkIntervalSeconds, timeoutSeconds, appLimit }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const settings = await client.query('SELECT app_limit FROM user_settings WHERE user_id=$1 FOR UPDATE', [userId]);
+      if (!settings.rowCount) { await client.query('ROLLBACK'); return null; }
+      const count = await client.query('SELECT count(*)::int AS count FROM apps WHERE user_id=$1', [userId]);
+      if (appLimit < count.rows[0].count) throw Object.assign(new Error(`This account already has ${count.rows[0].count} applications. Remove some before lowering the limit.`), { code: 'APP_LIMIT_BELOW_CURRENT' });
+      await client.query('UPDATE user_settings SET check_interval_seconds=$2,timeout_seconds=$3,app_limit=$4,updated_at=now() WHERE user_id=$1', [userId,checkIntervalSeconds,timeoutSeconds,appLimit]);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
     return this.getPreferences(userId);
   }
   async updateNotifications(userId, { emailAlerts, alertEmail, alertOnDown, alertOnRecovery }) {
@@ -151,6 +162,21 @@ export class PgStore {
       await client.query('DELETE FROM app_groups WHERE id=$1 AND user_id=$2', [id,userId]);
       await client.query('COMMIT');
       return true;
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
+  }
+
+  async moveGroupOnMap(userId, id, { dx, dy }) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const group = await client.query('SELECT name FROM app_groups WHERE id=$1 AND user_id=$2 FOR UPDATE', [id,userId]);
+      if (!group.rowCount) { await client.query('ROLLBACK'); return null; }
+      const { rows } = await client.query(`UPDATE apps SET
+        x=GREATEST(8,LEAST(90,x+$3)), y=GREATEST(10,LEAST(88,y+$4))
+        WHERE user_id=$1 AND group_name=$2 RETURNING id,x,y`, [userId,group.rows[0].name,dx,dy]);
+      await client.query('COMMIT');
+      return rows.map(row => ({ id: row.id, x: Number(row.x), y: Number(row.y) }));
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
   }
@@ -194,7 +220,17 @@ export class PgStore {
   }
   async create(userId, fields) {
     const id = randomUUID();
-    await this.pool.query('INSERT INTO apps (id,user_id,name,url,group_name,x,y) VALUES ($1,$2,$3,$4,$5,$6,$7)', [id,userId,fields.name,fields.url,fields.group,fields.x,fields.y]);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const settings = await client.query('SELECT app_limit FROM user_settings WHERE user_id=$1 FOR UPDATE', [userId]);
+      if (!settings.rowCount) throw new Error('Account settings were not found.');
+      const count = await client.query('SELECT count(*)::int AS count FROM apps WHERE user_id=$1', [userId]);
+      if (count.rows[0].count >= settings.rows[0].app_limit) throw Object.assign(new Error(`Application limit reached (${settings.rows[0].app_limit}). Increase your limit in Settings or remove an application first.`), { code: 'APP_LIMIT_REACHED' });
+      await client.query('INSERT INTO apps (id,user_id,name,url,group_name,x,y) VALUES ($1,$2,$3,$4,$5,$6,$7)', [id,userId,fields.name,fields.url,fields.group,fields.x,fields.y]);
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
     return this.get(userId, id);
   }
   async update(userId, id, fields) {
